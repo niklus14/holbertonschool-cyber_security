@@ -1,7 +1,6 @@
 # 0x01 Linux Privilege Escalation
 
 Cyber Shell 0x02 — Linux privilege escalation tasks.  
-Default access: `ssh user@<target-ip>` (password: `user`)
 
 | Task | Technique | Flag file |
 |------|-----------|-----------|

